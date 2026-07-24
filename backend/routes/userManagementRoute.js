@@ -1,0 +1,18 @@
+const express = require('express');
+const router = express.Router();
+const userManagementApiController = require('../controllers/userManagementApiController');
+const { requireApiLogin, authorizeRoles } = require('../middlewares/authMiddleware');
+router.use(requireApiLogin, authorizeRoles('ADMIN'));
+router.get('/students', userManagementApiController.listStudents);
+router.post('/students', userManagementApiController.addStudent);
+router.put('/students/:student_id', userManagementApiController.editStudent);
+router.delete('/students/:student_id', userManagementApiController.deleteStudent);
+router.get('/teachers', userManagementApiController.listTeachers);
+router.post('/teachers', userManagementApiController.addTeacher);
+router.put('/teachers/:teacher_id', userManagementApiController.editTeacher);
+router.delete('/teachers/:teacher_id', userManagementApiController.deleteTeacher);
+router.get('/accounts', userManagementApiController.listAccounts);
+router.delete('/accounts/:user_id', userManagementApiController.deleteAccount);
+router.put('/accounts/:user_id/reset-password', userManagementApiController.resetPassword);
+router.put('/:id/status', userManagementApiController.changeUserStatus);
+module.exports = router;
