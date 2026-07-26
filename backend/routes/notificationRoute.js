@@ -1,0 +1,11 @@
+const express = require('express');
+const router = express.Router();
+const notificationApiController = require('../controllers/notificationApiController');
+const { requireApiLogin, authorizeRoles } = require('../middlewares/authMiddleware');
+router.get('/my', requireApiLogin, notificationApiController.listMyNotifications);
+router.put('/my/:id/read', requireApiLogin, notificationApiController.readNotification);
+router.get('/admin/all', requireApiLogin, authorizeRoles('ADMIN'), notificationApiController.adminListAll);
+router.post('/admin', requireApiLogin, authorizeRoles('ADMIN'), notificationApiController.adminCreate);
+router.put('/admin/:id', requireApiLogin, authorizeRoles('ADMIN'), notificationApiController.adminUpdate);
+router.delete('/admin/:id', requireApiLogin, authorizeRoles('ADMIN'), notificationApiController.adminDelete);
+module.exports = router;
