@@ -421,7 +421,8 @@ sequenceDiagram
 cd backend
 npm install
 node app.js
-npx nodemon app.js
+```
+npx nodemon app.js # Dành cho chế độ phát triển 
 ```
 *Server Backend lắng nghe tại: `http://localhost:3000`*
 
