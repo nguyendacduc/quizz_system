@@ -123,14 +123,24 @@ sequenceDiagram
     Ctrl->>Model: findUserByUsername(username)
     Model->>DB: SELECT u.*, r.role_code FROM users u JOIN roles r ... WHERE u.username = ?
     DB-->>Model: Trả về dòng bản ghi người dùng & role_code
-    Ctrl->>Ctrl: Kiểm tra user.is_active và bcrypt.compare(password, user.password_hash)
-    Ctrl->>Model: getProfile(user_id, role_code) -> Lấy avatar, tên từ bảng students/teachers
-    Ctrl->>Model: updateLastLogin(user_id)
-    Ctrl->>DB: Ghi log vào activity_logs ("Tài khoản ... đã đăng nhập")
-    Ctrl-->>FE: Trả về JSON { success: true, user: { user_id, username, role_code, avatar } } (kèm Session Cookie)
-    FE->>AuthContext: Gọi login(userData) -> Cập nhật State user toàn cục
-    FE->>Router: Chuyển hướng trang theo vai trò:
-    Note over Router: ADMIN -> /admin/dashboard<br/>TEACHER -> /teacher/dashboard<br/>STUDENT -> /student/dashboard
+    Model-->>Ctrl: Dữ liệu tài khoản
+
+    alt Tài khoản không tồn tại / Mật khẩu sai / Tài khoản bị khóa (is_active = false)
+        Ctrl-->>FE: Trả về JSON { success: false, message: "Thông tin đăng nhập không hợp lệ" }
+        FE-->>User: Hiển thị thông báo lỗi trên màn hình
+    else Đăng nhập thành công (Đúng mật khẩu bcrypt & active)
+        Ctrl->>Model: getProfile(user_id, role_code)
+        Model->>DB: SELECT thông tin chi tiết từ sinh viên / giảng viên
+        DB-->>Model: Trả về dữ liệu Profile (Họ tên, Avatar)
+        Model-->>Ctrl: Trả về Profile
+        Ctrl->>Model: updateLastLogin & createActivityLog(user_id)
+        Model->>DB: UPDATE last_login & INSERT activity_logs
+        Ctrl-->>FE: Trả về JSON { success: true, user: {...} } (Kèm Session Cookie)
+        FE->>AuthContext: Gọi login(userData) -> Cập nhật State toàn cục
+        FE->>Router: Điều hướng trang theo vai trò
+        Note over Router: ADMIN -> /admin/dashboard<br/>TEACHER -> /teacher/dashboard<br/>STUDENT -> /student/dashboard
+        Router-->>User: Hiển thị màn hình Dashboard tương ứng
+    end
 ```
 
 - **Đầu vào (Input)**: Username & Mật khẩu từ form Đăng nhập tại [Login.jsx](file:///D:/Website%20Thi%20tr%E1%BA%AFc%20nghi%E1%BB%87m%20-%20Copy/frontend/src/pages/Login.jsx).
@@ -146,27 +156,46 @@ sequenceDiagram
 sequenceDiagram
     autonumber
     actor Admin as Quản trị viên
-    participant FE as UserManagement.jsx
+    participant FE as Frontend (UserManagement.jsx)
     participant Ctrl as userManagementApiController.js
     participant Model as userManagementModel.js
     participant DB as MySQL Database
 
-    Admin->>FE: Bấm "Thêm Sinh viên/Giảng viên" -> Nhập thông tin & Chọn Ảnh đại diện -> Bấm "Lưu"
-    FE->>Ctrl: POST /api/admin/users/students (hoặc /teachers) { username, password, full_name, email, class_id/department_id, avatar }
+    Admin->>FE: Bấm "Thêm Sinh viên" -> Nhập form & Chọn Ảnh đại diện -> "Lưu"
+    FE->>Ctrl: POST /api/admin/users/students { data, avatar }
     Ctrl->>Ctrl: bcrypt.hash(password, 10) -> Tạo password_hash
-    Ctrl->>Model: createStudentTransaction(username, password_hash, role_id=3, studentData)
+    Ctrl->>Model: createStudentTransaction(userData, studentData)
+    
     Note over Model,DB: BẮT ĐẦU MYSQL TRANSACTION
-    Model->>DB: 1. INSERT INTO users (username, password_hash, role_id)
-    DB-->>Model: Trả về insertId (userId)
-    Model->>DB: 2. INSERT INTO students (student_code, full_name, gender, date_of_birth, email, class_id, avatar)
-    DB-->>Model: Trả về insertId (studentId)
-    Model->>DB: 3. INSERT INTO student_accounts (user_id, student_id)
-    Note over Model,DB: COMMIT TRANSACTION (Nếu lỗi -> ROLLBACK)
-    Ctrl->>DB: Ghi log hoạt động vào activity_logs
-    Ctrl-->>FE: JSON { success: true, message: "Thêm thành công" }
-    FE->>FE: Re-fetch danh sách (getStudents/getTeachers) -> Render lại Bảng dữ liệu
-    Admin->>FE: Bấm biểu tượng "Con mắt" (Xem chi tiết)
-    FE->>FE: Mở Modal "Thông tin chi tiết" -> Hiển thị Avatar (Base64), Mã số, Họ tên, Lớp/Khoa, Email, SĐT
+    
+    alt Thực thi các truy vấn thành công
+        Model->>DB: 1. INSERT INTO users (username, password_hash, role_id)
+        DB-->>Model: Trả về user_id (insertId)
+        Model->>DB: 2. INSERT INTO students (student_code, full_name, avatar...)
+        DB-->>Model: Trả về student_id (insertId)
+        Model->>DB: 3. INSERT INTO student_accounts (user_id, student_id)
+        DB-->>Model: Xác nhận liên kết
+        Note over Model,DB: COMMIT TRANSACTION (Lưu vĩnh viễn)
+        Model-->>Ctrl: Trả về thông báo tạo thành công
+        
+        Ctrl->>Model: logActivity(user_id, "Thêm sinh viên mới")
+        Model->>DB: INSERT INTO activity_logs
+        
+        Ctrl-->>FE: JSON { success: true, message: "Thêm thành công" }
+        FE->>FE: Re-fetch danh sách (getStudents) -> Render lại bảng dữ liệu
+        FE-->>Admin: Hiển thị thông báo "Thêm thành công" (Toast)
+    else Có lỗi xảy ra ở bất kỳ truy vấn nào (Lỗi DB)
+        Note over Model,DB: ROLLBACK TRANSACTION (Hủy bỏ toàn bộ)
+        Model-->>Ctrl: Ném ngoại lệ (Exception Error)
+        Ctrl-->>FE: JSON { success: false, message: "Lỗi hệ thống, vui lòng thử lại" }
+        FE-->>Admin: Hiển thị thông báo lỗi
+    end
+
+    opt Xem chi tiết người dùng
+        Admin->>FE: Bấm biểu tượng "Con mắt" (Xem chi tiết) trên dòng dữ liệu
+        FE->>FE: Mở Modal "Thông tin chi tiết"
+        FE-->>Admin: Hiển thị (Avatar Base64, Mã số, Họ tên, Lớp/Khoa...)
+    end
 ```
 
 - **Đầu vào (Input)**: Form thông tin cá nhân + Ảnh đại diện file đĩa (FileReader chuyển thành `Base64`) tại [UserManagement.jsx](file:///D:/Website%20Thi%20tr%E1%BA%AFc%20nghi%E1%BB%87m%20-%20Copy/frontend/src/pages/admin/UserManagement.jsx).
@@ -181,26 +210,40 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Teacher as Giảng viên / Admin
-    participant FE as QuestionsManagement.jsx
+    actor Teacher as Giảng viên / Quản trị viên
+    participant FE as Frontend (QuestionsManagement.jsx)
     participant Ctrl as questionApiController.js
     participant Model as questionModel.js
     participant DB as MySQL Database
 
-    Teacher->>FE: Chọn Môn học, Chương, Độ khó, Loại câu hỏi (Một đáp án / Nhiều đáp án)
-    FE->>FE: isMultipleChoice(type_id) kiểm tra type_name:<br/>- Nếu là "Một đáp án": Chuyển giao diện Radio (Chỉ chọn 1 đúng)<br/>- Nếu là "Nhiều đáp án": Chuyển giao diện Checkbox (Chọn 2+ đúng)
-    Teacher->>FE: Nhập nội dung câu hỏi, danh sách đáp án A, B, C, D -> Đánh dấu đáp án đúng -> Bấm "Lưu"
-    FE->>Ctrl: POST /api/questions { subject_id, chapter_id, difficulty_id, question_type_id, question_content, answers: [{answer_content, is_correct}] }
+    Teacher->>FE: Chọn Môn học, Chương, Độ khó, Loại câu hỏi
+    Note over Teacher, FE: Xử lý giao diện (isMultipleChoice):<br/>- "Một đáp án" -> Dùng Radio (1 lựa chọn đúng)<br/>- "Nhiều đáp án" -> Dùng Checkbox (Nhiều lựa chọn đúng)
+    
+    Teacher->>FE: Nhập nội dung câu hỏi, các đáp án & Đánh dấu đúng/sai -> "Lưu"
+    FE->>Ctrl: POST /api/questions { questionData, answers: [...] }
     Ctrl->>Model: createQuestionWithAnswers(teacher_id, questionData, answers)
+    
     Note over Model,DB: BẮT ĐẦU MYSQL TRANSACTION
-    Model->>DB: 1. INSERT INTO questions (subject_id, chapter_id, difficulty_id, question_type_id, teacher_id, question_content, score)
-    DB-->>Model: Trả về question_id mới
-    loop Với từng đáp án trong mảng answers
-        Model->>DB: 2. INSERT INTO answers (question_id, answer_content, is_correct, answer_order)
+    
+    alt Thực thi các truy vấn thành công
+        Model->>DB: 1. INSERT INTO questions (...)
+        DB-->>Model: Trả về question_id (insertId)
+        
+        loop Duyệt qua từng đáp án trong mảng answers
+            Model->>DB: 2. INSERT INTO answers (question_id, answer_content, is_correct, ...)
+        end
+        
+        Note over Model,DB: COMMIT TRANSACTION (Lưu vĩnh viễn)
+        Model-->>Ctrl: Trả về thông báo tạo thành công
+        Ctrl-->>FE: JSON { success: true, message: "Tạo câu hỏi thành công" }
+        FE->>FE: Re-fetch danh sách (getQuestions)
+        FE-->>Teacher: Hiển thị thông báo và danh sách câu hỏi mới
+    else Lỗi xảy ra (VD: Mất kết nối DB, sai định dạng)
+        Note over Model,DB: ROLLBACK TRANSACTION (Hủy bỏ toàn bộ)
+        Model-->>Ctrl: Ném ngoại lệ (Exception Error)
+        Ctrl-->>FE: JSON { success: false, message: "Lỗi hệ thống, vui lòng thử lại" }
+        FE-->>Teacher: Hiển thị thông báo lỗi
     end
-    Note over Model,DB: COMMIT TRANSACTION
-    Ctrl-->>FE: JSON { success: true, message: "Tạo câu hỏi thành công" }
-    FE->>FE: Tải lại danh sách câu hỏi -> Hiển thị danh sách kèm nhãn phân loại
 ```
 
 - **Đầu vào (Input)**: Nội dung câu hỏi + Loại câu hỏi + Danh sách đáp án được tích chọn đúng tại [QuestionsManagement.jsx](file:///D:/Website%20Thi%20tr%E1%BA%AFc%20nghi%E1%BB%87m%20-%20Copy/frontend/src/pages/common/QuestionsManagement.jsx).
@@ -218,22 +261,44 @@ sequenceDiagram
     actor Teacher as Giảng viên
     participant FE_Exam as ExamsManagement.jsx
     participant FE_Room as RoomsManagement.jsx
-    participant API as Express Routes
-    participant Model as examModel.js / roomModel.js
+    participant Ctrl as API Controller (exam/room)
+    participant Model as Database Model (exam/room)
     participant DB as MySQL Database
 
-    Teacher->>FE_Exam: Soạn Đề thi: Chọn Môn học, Nhập Tên đề, Thời gian làm bài, Cấu hình Trộn câu/đáp án
-    Teacher->>FE_Exam: Chọn các câu hỏi từ Ngân hàng câu hỏi gán vào Đề thi -> Bấm "Lưu đề thi"
-    FE_Exam->>API: POST /api/exams { exam_code, exam_name, subject_id, duration, shuffle_questions, shuffle_answers, question_ids }
-    API->>Model: createExamWithQuestions(...) -> Chèn bảng `exams` & `exam_questions`
-    Model->>DB: INSERT INTO exams & INSERT INTO exam_questions
-    API-->>FE_Exam: Báo tạo Đề thi thành công (Trạng thái: PUBLISHED)
+    %% LUỒNG TẠO ĐỀ THI
+    Teacher->>FE_Exam: Soạn Đề thi: Chọn Môn học, cấu hình thời gian & trộn đề
+    Teacher->>FE_Exam: Chọn câu hỏi từ Ngân hàng -> Bấm "Lưu đề thi"
+    FE_Exam->>Ctrl: POST /api/exams { exam_data, question_ids }
+    Ctrl->>Model: createExamWithQuestions(...)
+    
+    Note over Model,DB: BẮT ĐẦU TRANSACTION (Tạo Đề thi)
+    alt Tạo Đề thi thành công
+        Model->>DB: 1. INSERT INTO exams
+        DB-->>Model: Trả về exam_id
+        Model->>DB: 2. INSERT INTO exam_questions (Dựa trên mảng question_ids)
+        Note over Model,DB: COMMIT TRANSACTION
+        Model-->>Ctrl: Trả về thông báo thành công
+        Ctrl-->>FE_Exam: JSON { success: true, message: "Tạo Đề thi thành công" }
+        FE_Exam-->>Teacher: Hiển thị Đề thi (Trạng thái: PUBLISHED)
+    else Lỗi DB
+        Note over Model,DB: ROLLBACK TRANSACTION
+        Ctrl-->>FE_Exam: JSON { success: false, message: "Lỗi hệ thống" }
+    end
 
-    Teacher->>FE_Room: Mở Phòng thi: Chọn Đề thi vừa tạo, Nhập Mã phòng (room_code), Mật khẩu, Thời gian bắt đầu/kết thúc
-    FE_Room->>API: POST /api/rooms { room_code, room_name, exam_id, room_password, max_students, start_time, end_time }
-    API->>Model: createRoom(...) -> Chèn bảng `exam_rooms`
+    %% LUỒNG MỞ PHÒNG THI
+    Teacher->>FE_Room: Mở Phòng thi: Chọn Đề thi, Nhập Mã phòng (room_code), Thời gian
+    FE_Room->>Ctrl: POST /api/rooms { room_data, exam_id }
+    Ctrl->>Model: createRoom(...)
+    
     Model->>DB: INSERT INTO exam_rooms (status = 'WAITING')
-    API-->>FE_Room: Báo mở phòng thi thành công -> Hiển thị phòng trong danh sách phòng chờ
+    alt Tạo Phòng thi thành công
+        DB-->>Model: Trả về room_id
+        Model-->>Ctrl: Trả về dữ liệu phòng thi
+        Ctrl-->>FE_Room: JSON { success: true, message: "Mở phòng thi thành công" }
+        FE_Room-->>Teacher: Hiển thị phòng trong danh sách "Đang chờ" (Sảnh chờ)
+    else Lỗi (VD: Trùng mã phòng)
+        Ctrl-->>FE_Room: JSON { success: false, message: "Mã phòng đã tồn tại" }
+    end
 ```
 
 - **Đầu vào (Input)**: Cấu hình đề thi (thời gian, điểm đạt, trộn câu hỏi/đáp án) & Cấu hình phòng thi (Mã phòng, mật khẩu, thời gian) từ [ExamsManagement.jsx](file:///D:/Website%20Thi%20tr%E1%BA%AFc%20nghi%E1%BB%87m%20-%20Copy/frontend/src/pages/common/ExamsManagement.jsx) và [RoomsManagement.jsx](file:///D:/Website%20Thi%20tr%E1%BA%AFc%20nghi%E1%BB%87m%20-%20Copy/frontend/src/pages/common/RoomsManagement.jsx).
@@ -250,34 +315,58 @@ sequenceDiagram
     autonumber
     actor Student as Sinh viên
     actor Teacher as Giảng viên
-    participant FE_Student as StudentDashboard.jsx / StudentLobby.jsx
+    participant FE_Student as StudentDashboard / Lobby
     participant FE_Teacher as RoomLobby.jsx
-    participant Ctrl as roomApiController.js / takeExamApiController.js
-    participant Model as takeExamModel.js / roomModel.js
+    participant Ctrl as API Controller (room/takeExam)
+    participant Model as Database Model (room/takeExam)
     participant DB as MySQL Database
 
-    Student->>FE_Student: Nhập Mã phòng thi & Mật khẩu phòng -> Bấm "Vào phòng thi"
+    %% SINH VIÊN XIN VÀO PHÒNG
+    Student->>FE_Student: Nhập Mã phòng thi & Mật khẩu -> "Vào phòng thi"
     FE_Student->>Ctrl: POST /api/student/exam/join { room_code, password }
     Ctrl->>Model: joinRoom(student_id, room_code, password)
-    Model->>DB: Kiểm tra phòng trong `exam_rooms`, Chèn bản ghi `room_students` (status = 'PENDING')
-    Ctrl-->>FE_Student: Chuyển hướng Sinh viên tới màn hình Phòng chờ (/student/lobby)
-
-    loop Polling mỗi 3 giây tại RoomLobby.jsx
-        FE_Teacher->>Ctrl: GET /api/rooms/:roomId/students
-        Ctrl->>Model: getRoomStudents(roomId) -> Trả về danh sách sinh viên PENDING
-        Ctrl-->>FE_Teacher: Cập nhật danh sách sinh viên đang chờ duyệt lên màn hình Giảng viên
+    
+    alt Thông tin hợp lệ
+        Model->>DB: Kiểm tra `exam_rooms` & INSERT `room_students` (status = 'PENDING')
+        DB-->>Model: Trả về thành công
+        Model-->>Ctrl: Xác nhận trạng thái PENDING
+        Ctrl-->>FE_Student: JSON { success: true } -> Điều hướng tới Sảnh chờ (/student/lobby)
+    else Sai mật khẩu / Phòng không tồn tại
+        Model-->>Ctrl: Ném lỗi
+        Ctrl-->>FE_Student: JSON { success: false, message: "Sai mã phòng hoặc mật khẩu" }
     end
 
-    Teacher->>FE_Teacher: Bấm nút "Duyệt" (Approve) cho sinh viên
-    FE_Teacher->>Ctrl: PUT /api/rooms/:roomId/approve/:studentId
-    Ctrl->>DB: UPDATE room_students SET status = 'APPROVED' WHERE room_id = ? AND student_id = ?
+    %% GIẢNG VIÊN POLLING LẤY DANH SÁCH
+    loop Polling mỗi 3 giây (Phía Giảng viên)
+        FE_Teacher->>Ctrl: GET /api/rooms/:roomId/students
+        Ctrl->>Model: getRoomStudents(roomId)
+        Model->>DB: SELECT * FROM room_students WHERE room_id = ?
+        DB-->>Model: Trả về danh sách sinh viên
+        Model-->>Ctrl: Dữ liệu danh sách
+        Ctrl-->>FE_Teacher: Cập nhật UI danh sách sinh viên đang chờ duyệt (PENDING)
+    end
 
-    loop Polling mỗi 3 giây tại StudentLobby.jsx
+    %% GIẢNG VIÊN DUYỆT
+    Teacher->>FE_Teacher: Bấm "Duyệt" (Approve) cho sinh viên
+    FE_Teacher->>Ctrl: PUT /api/rooms/:roomId/approve/:studentId
+    Ctrl->>Model: approveStudent(roomId, studentId)
+    Model->>DB: UPDATE room_students SET status = 'APPROVED' WHERE ...
+    DB-->>Model: Xác nhận cập nhật
+    Model-->>Ctrl: Trả về thành công
+    Ctrl-->>FE_Teacher: Thông báo duyệt thành công trên UI
+
+    %% SINH VIÊN POLLING KIỂM TRA TRẠNG THÁI
+    loop Polling mỗi 3 giây (Phía Sinh viên)
         FE_Student->>Ctrl: GET /api/student/exam/:roomId/check-approval
-        Ctrl->>DB: SELECT status FROM room_students WHERE room_id = ? AND student_id = ?
+        Ctrl->>Model: checkStudentApproval(roomId, studentId)
+        Model->>DB: SELECT status FROM room_students WHERE ...
+        DB-->>Model: Trả về status = 'APPROVED'
+        Model-->>Ctrl: Dữ liệu trạng thái
         Ctrl-->>FE_Student: Trả về status = 'APPROVED'
     end
-    FE_Student->>FE_Student: Tự động kích hoạt nút "BẮT ĐẦU LÀM BÀI" -> Sinh viên bấm vào thi!
+    
+    FE_Student->>FE_Student: Tự động kích hoạt nút "BẮT ĐẦU LÀM BÀI"
+    Student->>FE_Student: Bấm "BẮT ĐẦU LÀM BÀI" -> Chuyển sang giao diện thi!
 ```
 
 - **Đầu vào (Input)**: Mã phòng thi & Mật khẩu từ Sinh viên; Thao tác duyệt từ Giảng viên tại [StudentDashboard.jsx](file:///D:/Website%20Thi%20tr%E1%BA%AFc%20nghi%E1%BB%87m%20-%20Copy/frontend/src/pages/student/StudentDashboard.jsx) và [RoomLobby.jsx](file:///D:/Website%20Thi%20tr%E1%BA%AFc%20nghi%E1%BB%87m%20-%20Copy/frontend/src/pages/teacher/RoomLobby.jsx).
@@ -293,45 +382,55 @@ sequenceDiagram
 sequenceDiagram
     autonumber
     actor Student as Sinh viên
-    participant FE as StudentExam.jsx
+    participant FE as Frontend (StudentExam.jsx)
     participant Ctrl as takeExamApiController.js
     participant Model as takeExamModel.js
     participant DB as MySQL Database
 
+    %% GIAI ĐOẠN 1: BẮT ĐẦU THI
     FE->>Ctrl: POST /api/student/exam/:roomId/start
     Ctrl->>Model: startAttempt(room_id, student_id)
-    Model->>DB: INSERT INTO exam_attempts (room_id, exam_id, student_id, start_time, status='IN_PROGRESS')
+    Model->>DB: INSERT INTO exam_attempts (status = 'IN_PROGRESS')
     DB-->>Model: Trả về attempt_id
     Ctrl->>Model: getExamPaper(exam_id)
-    Model->>DB: SELECT câu hỏi & đáp án (Thực hiện TRỘN CÂU HỎI / TRỘN ĐÁP ÁN nếu exam.shuffle = 1)
-    Ctrl-->>FE: Trả về Đề thi chi tiết & Thời gian đếm ngược
+    Model->>DB: SELECT câu hỏi & đáp án
+    Note over Model,DB: Thực hiện TRỘN CÂU HỎI & ĐÁP ÁN (nếu exam.shuffle = 1)
+    Model-->>Ctrl: Dữ liệu đề thi đã xử lý
+    Ctrl-->>FE: Trả về Đề thi chi tiết & Thời lượng đếm ngược
 
-    Note over FE: SINH VIÊN THỰC HIỆN LÀM BÀI THI
-    loop Khi sinh viên chọn đáp án
-        FE->>FE: Cập nhật state selectedAnswers:<br/>- Single choice: { qId: answerId }<br/>- Multi choice: { qId: [ansId1, ansId2] }<br/>Lưu backup vào localStorage (chống mất bài khi F5)
+    %% GIAI ĐOẠN 2: LÀM BÀI & BACKUP
+    Note over Student, FE: GIAI ĐOẠN 2: QUÁ TRÌNH LÀM BÀI THI
+    loop Mỗi khi thao tác chọn/đổi đáp án
+        Student->>FE: Click chọn đáp án
+        FE->>FE: Cập nhật State (Single choice: {q: a} / Multi choice: {q: [a1, a2]})
+        FE->>FE: Lưu backup State vào localStorage (Chống mất dữ liệu khi F5/Rớt mạng)
     end
 
-    Note over FE: NỘP BÀI THI (Sinh viên bấm Nộp / Hết giờ Auto Submit / Giám thị đóng phòng)
-    FE->>Ctrl: POST /api/student/exam/:attemptId/submit { answers: [{ question_id, answer_id | answer_ids }] }
-    Ctrl->>Model: submitAndGrade(attempt_id, student_id, studentAnswersArray)
-    Note over Model,DB: BẮT ĐẦU MYSQL TRANSACTION CHẤM ĐIỂM TỰ ĐỘNG
-    loop Đối với từng câu hỏi trong đề thi
-        alt Nếu là câu Single Choice (answer_id)
-            Model->>DB: Tra cứu `answers` xem `is_correct == 1`?
-        else Nếu là câu Multiple Choice (answer_ids mảng)
-            Model->>DB: Tra cứu tất cả đáp án đúng của câu hỏi trong `answers`
-            Model->>Model: Thuật toán: Tập sinh viên chọn phải KHỚP 100% tập đáp án đúng!
-        end
-        alt Đúng câu hỏi
-            Model->>Model: Cộng điểm câu hỏi vào totalScore, tăng correctCount++
-        end
-        Model->>DB: INSERT INTO student_answers (attempt_id, question_id, answer_id, is_correct)
+    %% GIAI ĐOẠN 3: NỘP BÀI & CHẤM ĐIỂM
+    Note over Student, FE: GIAI ĐOẠN 3: NỘP BÀI (Chủ động / Hết giờ / Bị thu bài)
+    FE->>Ctrl: POST /api/student/exam/:attemptId/submit { answers: [...] }
+    Ctrl->>Model: submitAndGrade(attempt_id, studentAnswers)
+
+    Note over Model,DB: BẮT ĐẦU TRANSACTION CHẤM ĐIỂM TỰ ĐỘNG
+    alt Chấm điểm và Lưu thành công
+        Model->>DB: SELECT toàn bộ Đáp án đúng (Answer Key) của Đề thi
+        DB-->>Model: Trả về tập hợp đáp án
+        Model->>Model: Chạy thuật toán chấm điểm (Tính totalScore & correctCount)
+        Note over Model: Điều kiện: Câu Multi-choice phải KHỚP 100% tập đáp án đúng
+        
+        Model->>DB: Lệnh BULK INSERT lưu chi tiết bài làm vào bảng student_answers
+        Model->>DB: UPDATE exam_attempts SET score=totalScore, status='SUBMITTED', submit_time=NOW()
+        Note over Model,DB: COMMIT TRANSACTION (Lưu vĩnh viễn)
+        
+        Model-->>Ctrl: Hoàn tất chấm điểm
+        Ctrl-->>FE: JSON { success: true, message: "Nộp bài thành công" }
+        FE->>FE: Xóa dữ liệu backup trong localStorage
+        FE-->>Student: Chuyển hướng (/results) -> Hiển thị Vòng tròn điểm số & Thống kê
+    else Lỗi hệ thống (VD: Mất kết nối DB)
+        Note over Model,DB: ROLLBACK TRANSACTION
+        Model-->>Ctrl: Ném ngoại lệ
+        Ctrl-->>FE: JSON { success: false, message: "Lỗi hệ thống, hệ thống đã lưu tạm thời bài làm" }
     end
-    Model->>DB: UPDATE exam_attempts SET submit_time = NOW(), score = totalScore, correct_answers = correctCount, status = 'SUBMITTED'
-    Note over Model,DB: COMMIT TRANSACTION
-    Ctrl-->>FE: JSON { success: true, message: "Nộp bài thành công" }
-    FE->>FE: Xóa localStorage backup -> Chuyển hướng tới Màn hình Kết quả (/student/results/:attemptId)
-    FE->>Student: Hiển thị Điểm số, Số câu đúng/tổng số câu, Thời gian làm bài trên giao diện Vòng tròn điểm số!
 ```
 
 - **Đầu vào (Input)**: Các lựa chọn đáp án của sinh viên trên giao diện đếm ngược làm bài tại [StudentExam.jsx](file:///D:/Website%20Thi%20tr%E1%BA%AFc%20nghi%E1%BB%87m%20-%20Copy/frontend/src/pages/student/StudentExam.jsx).
@@ -348,35 +447,49 @@ sequenceDiagram
     autonumber
     actor Teacher as Giảng viên
     actor Admin as Quản trị viên
-    participant FE_Mon as RoomMonitor.jsx / RoomScoreboard.jsx
-    participant FE_Stat as AdminDashboard.jsx / Statistics.jsx
-    participant API as Express Routes
-    participant Model as roomModel.js / resultModel.js / dashboardModel.js
+    participant FE_Teacher as Giao diện Giảng viên
+    participant FE_Admin as Giao diện Admin
+    participant Ctrl as API Controller (room/result/dashboard)
+    participant Model as Database Model
     participant DB as MySQL Database
 
-    Teacher->>FE_Mon: Vào trang Giám sát Phòng thi (/teacher/room-monitor/:roomId)
-    loop Polling cập nhật tiến độ
-        FE_Mon->>API: GET /api/rooms/:roomId/monitor
-        API->>DB: Query `room_students` JOIN `exam_attempts`
-        API-->>FE_Mon: Hiển thị danh sách sinh viên đang làm bài / đã nộp bài
+    %% GIÁM SÁT VÀ KẾT THÚC PHÒNG THI
+    Teacher->>FE_Teacher: Vào trang Giám sát Phòng thi (Room Monitor)
+    loop Polling (Cập nhật tiến độ liên tục)
+        FE_Teacher->>Ctrl: GET /api/rooms/:roomId/monitor
+        Ctrl->>Model: getRoomMonitor(roomId)
+        Model->>DB: Query `room_students` JOIN `exam_attempts`
+        DB-->>Model: Trả về trạng thái thí sinh
+        Model-->>Ctrl: Dữ liệu tiến độ
+        Ctrl-->>FE_Teacher: Hiển thị danh sách đang làm bài / đã nộp bài
     end
 
-    Teacher->>FE_Mon: Bấm "Kết thúc phòng thi"
-    FE_Mon->>API: PUT /api/rooms/:roomId/status { status: 'FINISHED' }
-    API->>DB: UPDATE exam_rooms SET status = 'FINISHED' WHERE room_id = ?
-    API-->>FE_Mon: Phòng thi đóng -> Tất cả thí sinh đang làm bài bị Auto-submit lập tức
+    Teacher->>FE_Teacher: Bấm "Kết thúc phòng thi"
+    FE_Teacher->>Ctrl: PUT /api/rooms/:roomId/status { status: 'FINISHED' }
+    Ctrl->>Model: closeRoom(roomId)
+    Model->>DB: UPDATE exam_rooms SET status = 'FINISHED' WHERE room_id = ?
+    DB-->>Model: Xác nhận cập nhật
+    Model-->>Ctrl: Trả về kết quả
+    Ctrl-->>FE_Teacher: Hiển thị phòng thi đã đóng
+    Note over FE_Teacher, Ctrl: Trạng thái đóng kích hoạt cơ chế Auto-submit<br/>cho toàn bộ thí sinh đang làm bài dở dang.
 
-    Teacher->>FE_Mon: Xem Bảng điểm phòng thi (/teacher/room-scoreboard/:roomId)
-    FE_Mon->>API: GET /api/results/room/:roomId/scoreboard
-    API->>Model: getRoomScoreboard(roomId)
-    Model->>DB: SELECT ea.score, ea.correct_answers, s.student_code, s.full_name FROM exam_attempts ea ... ORDER BY ea.score DESC
-    API-->>FE_Mon: Hiển thị Bảng xếp hạng điểm số từ cao xuống thấp
+    %% XEM BẢNG ĐIỂM
+    Teacher->>FE_Teacher: Xem Bảng điểm phòng thi (Scoreboard)
+    FE_Teacher->>Ctrl: GET /api/results/room/:roomId/scoreboard
+    Ctrl->>Model: getRoomScoreboard(roomId)
+    Model->>DB: SELECT ea.score, s.student_code... ORDER BY score DESC
+    DB-->>Model: Trả về danh sách điểm
+    Model-->>Ctrl: Dữ liệu bảng điểm
+    Ctrl-->>FE_Teacher: Hiển thị Bảng xếp hạng điểm số từ cao xuống thấp
 
-    Admin->>FE_Stat: Truy cập Trang Thống kê Hệ thống (/admin/dashboard)
-    FE_Stat->>API: GET /api/dashboard/stats
-    API->>Model: getDashboardStats()
-    Model->>DB: COUNT(*) từ users, questions, exams, exam_rooms
-    API-->>FE_Stat: Biểu đồ Chart.js vẽ tổng quan hoạt động toàn hệ thống
+    %% THỐNG KÊ DASHBOARD (ADMIN)
+    Admin->>FE_Admin: Truy cập Trang Thống kê Hệ thống (Dashboard)
+    FE_Admin->>Ctrl: GET /api/dashboard/stats
+    Ctrl->>Model: getDashboardStats()
+    Model->>DB: Thực hiện các lệnh COUNT(*) từ users, questions, exams...
+    DB-->>Model: Trả về các con số thống kê
+    Model-->>Ctrl: Dữ liệu tổng hợp
+    Ctrl-->>FE_Admin: Tích hợp Chart.js để vẽ biểu đồ tổng quan hoạt động
 ```
 
 - **Đầu vào (Input)**: Thao tác đóng phòng thi của Giảng viên tại [RoomMonitor.jsx](file:///D:/Website%20Thi%20tr%E1%BA%AFc%20nghi%E1%BB%87m%20-%20Copy/frontend/src/pages/teacher/RoomMonitor.jsx) hoặc thao tác xem thống kê của Admin tại [AdminDashboard.jsx](file:///D:/Website%20Thi%20tr%E1%BA%AFc%20nghi%E1%BB%87m%20-%20Copy/frontend/src/pages/admin/AdminDashboard.jsx).
